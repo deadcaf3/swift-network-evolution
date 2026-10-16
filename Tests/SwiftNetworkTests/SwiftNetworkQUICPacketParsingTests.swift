@@ -117,6 +117,63 @@ final class SwiftNetworkQUICPacketParsingTests: NetTestCase {
         )
     }
 
+    func testInitialLengthShorterThanPacketNumberAndTag() throws {
+        let harness = QUICTestHarness()
+
+        let server = try attachIdleServer(harness)
+        defer {
+            let teardownExpectation = XCTestExpectation(description: "Server harness torn down")
+            harness.context.async {
+                server.harness.stop()
+                server.harness.teardown()
+                harness.storage.releaseHeldInstances()
+                teardownExpectation.fulfill()
+            }
+            wait(for: [teardownExpectation], timeout: 5.0)
+        }
+
+        // 40-byte Initial with an 8-byte DCID, so headerLength == 17 and the
+        // 23 remaining bytes clear the packet number plus sample check.
+        // The payload-length varint claims 1 byte, which is shorter than
+        // any packet number plus the 16-byte AEAD tag.
+        var datagram: [UInt8] = [
+            0xC0,  // long header | fixed bit | Initial
+            0x00, 0x00, 0x00, 0x01,  // version 1
+            0x08,  // DCID length
+        ]
+        datagram.append(contentsOf: [UInt8](repeating: 0x11, count: 8))
+        datagram.append(contentsOf: [
+            0x00,  // SCID length
+            0x00,  // token length (varint)
+            0x01,  // payload length (varint) — 1 byte
+        ])
+        datagram.append(contentsOf: [UInt8](repeating: 0x41, count: 23))
+        XCTAssertEqual(datagram.count, 40)
+
+        let injectExpectation = XCTestExpectation(description: "Short-length Initial injected")
+        harness.context.async {
+            BridgeDatagramProtocol.BridgeInstance.injectDatagram(
+                Frame(copyBuffer: datagram),
+                to: harness.serverPort
+            )
+            injectExpectation.fulfill()
+        }
+        wait(for: [injectExpectation], timeout: 5.0)
+
+        let processedExpectation = XCTestExpectation(
+            description: "Wait for server to process the injected datagram"
+        )
+        _ = XCTWaiter.wait(for: [processedExpectation], timeout: 1.0)
+
+        // The server leaves `.idle` before decryption, so a dropped Initial
+        // leaves it in `.initialReceived`.
+        XCTAssertEqual(
+            server.instance.state,
+            .initialReceived,
+            "Server connection must drop an Initial whose length is shorter than packet number plus tag"
+        )
+    }
+
     func testMalformedShortHeaderAfterHandshake() throws {
         let harness = QUICTestHarness()
         harness.runQUICTest(

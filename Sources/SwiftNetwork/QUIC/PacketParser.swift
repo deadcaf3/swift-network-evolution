@@ -299,6 +299,14 @@ struct PacketParser: ~Copyable, PrefixedLoggable {
             if packet.longHeader {
                 // At this point, the packet number is already claimed, so subtract it from the remaining payload length
                 let remainingPayloadLength = Int(packet.payloadLength) - Int(packet.packetNumberLength)
+                // The Length field covers the packet number and the AEAD tag,
+                // so a shorter value would make `payloadRange` invalid
+                guard remainingPayloadLength >= Int(packet.tagLength) else {
+                    connection.log.error(
+                        "LH packet length too short: \(packet.payloadLength) < \(Int(packet.packetNumberLength) + Int(packet.tagLength))"
+                    )
+                    return nil
+                }
                 guard frame.unclaimedLength >= remainingPayloadLength else {
                     connection.log.error(
                         "Short LH packet: \(frame.unclaimedLength) < \(remainingPayloadLength)"
